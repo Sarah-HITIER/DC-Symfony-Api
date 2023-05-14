@@ -11,9 +11,12 @@ use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Annotation\Route;
 use Symfony\Component\Validator\Validator\ValidatorInterface;
 
+use Firebase\JWT\JWT;
+use Firebase\JWT\Key;
+
 class CategoryController extends AbstractController
 {
-    #[Route('/categories', name: 'app_category', methods:['GET'])]
+    #[Route('/categories', name: 'app_category', methods: ['GET'])]
     public function index(EntityManagerInterface $em): Response
     {
         $categories = $em->getRepository(Category::class)->findAll();
@@ -21,62 +24,85 @@ class CategoryController extends AbstractController
         return new JsonResponse($categories);
     }
 
-    #[Route('/category/{id}', name:'one_category', methods:['GET'])]
+    #[Route('/category/{id}', name: 'one_category', methods: ['GET'])]
     public function get($id, EntityManagerInterface $em): Response
     {
         $category = $em->getRepository(Category::class)->findOneById($id);
 
-        if($category == null){
+        if ($category == null) {
             return new JsonResponse('Catégorie introuvable', 404);
         }
 
         return new JsonResponse($category, 200);
     }
 
-    #[Route('/category', name:'category_add', methods:['POST'])]
-    public function add(Request $r, EntityManagerInterface $em, ValidatorInterface $v) : Response
+    #[Route('/category', name: 'category_add', methods: ['POST'])]
+    public function add(Request $r, EntityManagerInterface $em, ValidatorInterface $v): Response
     {
-        $category = new Category();
-        $category->setName($r->get('name')); // Récupère le paramètre 'name' de la requête et l'assigne à l'objet
+        // On récupère les infos envoyées en header
+        $headers = $r->headers->all();
+        // Si la clé 'token' existe et qu'elle n'est pas vide dans le header
+        if (isset($headers['token']) && !empty($headers['token'])) {
+            $jwt = current($headers['token']); // Récupère la cellule 0 avec current()
+            $key = $this->getParameter('jwt_secret');
 
-        $errors = $v->validate($category); // Vérifie que l'objet soit conforme avec les validations (assert)
-        if(count($errors) > 0){
-            // S'il y a au moins une erreur
-            $e_list = [];
-            foreach($errors as $e){ // On parcours toutes les erreurs
-                $e_list[] = $e->getMessage(); // On ajoute leur message dans le tableau de messages
+            // On essaie de décoder le jwt
+            try {
+                $decoded = JWT::decode($jwt, new Key($key, 'HS256'));
+            }
+            // Si la signature n'est pas vérifiée ou que la date d'expiration est passée, il entrera dans le catch
+            catch (\Exception $e) {
+                return new JsonResponse($e->getMessage(), 403);
             }
 
-            return new JsonResponse($e_list, 400); // On retourne le tableau de messages
+            // On regarde si la clé 'roles' existe et si l'utilisateur possède le bon rôle
+            if ($decoded->roles != null  && in_array('ROLE_USER', $decoded->roles)) {
+
+                $category = new Category();
+                $category->setName($r->get('name')); // Récupère le paramètre 'name' de la requête et l'assigne à l'objet
+
+                $errors = $v->validate($category); // Vérifie que l'objet soit conforme avec les validations (assert)
+                if (count($errors) > 0) {
+                    // S'il y a au moins une erreur
+                    $e_list = [];
+                    foreach ($errors as $e) { // On parcours toutes les erreurs
+                        $e_list[] = $e->getMessage(); // On ajoute leur message dans le tableau de messages
+                    }
+
+                    return new JsonResponse($e_list, 400); // On retourne le tableau de messages
+                }
+
+                $em->persist($category);
+                $em->flush();
+
+                return new JsonResponse('success', 201);
+            }
         }
 
-        $em->persist($category);
-        $em->flush();
-
-        return new JsonResponse('success', 201);
+        return new JsonResponse('Access denied', 403);
     }
 
-    #[Route('/category/{id}', name:'category_update', methods:['PATCH'])]
-    public function update(Category $category = null, Request $r, ValidatorInterface $v, EntityManagerInterface $em) : Response
+    #[Route('/category/{id}', name: 'category_update', methods: ['PATCH'])]
+    public function update(Category $category = null, Request $r, ValidatorInterface $v, EntityManagerInterface $em): Response
     {
-        if($category === null){
+        if ($category === null) {
             return new JsonResponse('Catégorie introuvable', 404); // Retourne un status 404 car le 204 ne retourne pas de message
         }
 
         $params = 0;
         // On regarde si l'attribut name reçu n'est pas null
-        if($r->get('name') != null){
+        if ($r->get('name') != null) {
             $params++;
             // On attribue à la category le nouveau name
             $category->setName($r->get('name'));
         }
 
-        if($params > 0){
+        if ($params > 0) {
             $errors = $v->validate($category); // Vérifie que l'objet soit conforme avec les validations (assert)
-            if(count($errors) > 0){
+            if (count($errors) > 0) {
                 // S'il y a au moins une erreur
                 $e_list = [];
-                foreach($errors as $e){ // On parcours toutes les erreurs
+                foreach ($errors as $e) { // On parcours toutes les erreurs
                     $e_list[] = $e->getMessage(); // On ajoute leur message dans le tableau de messages
                 }
 
@@ -86,18 +112,17 @@ class CategoryController extends AbstractController
             // Si tout va bien, on sauvegarde
             $em->persist($category);
             $em->flush();
-        }
-        else{
+        } else {
             return new JsonResponse('Empty', 200);
         }
 
         return new JsonResponse('Success', 200);
     }
 
-    #[Route('/category/{id}', name:'category_delete', methods:['DELETE'])]
+    #[Route('/category/{id}', name: 'category_delete', methods: ['DELETE'])]
     public function delete(Category $category = null, EntityManagerInterface $em): Response
     {
-        if($category == null){
+        if ($category == null) {
             return new JsonResponse('Catégorie introuvable', 404);
         }
 
@@ -105,5 +130,24 @@ class CategoryController extends AbstractController
         $em->flush();
 
         return new JsonResponse('Catégorie supprimée', 204);
+    }
+
+    #[Route('/file', name: 'file_upload', methods: ['POST'])]
+    public function upload(Request $r): Response
+    {
+        $file = $r->files->get('file'); // Récupère le fichier envoyé dans la requête
+
+        if ($file) {
+            $newFile = uniqid() . '.' . $file->guessExtension(); // Génère un nom de fichier unique
+
+            try {
+                $file->move($this->getParameter('upload_dir'), $newFile); // Déplace le fichier dans le dossier de destination
+            } catch (\Exception $e) {
+                return new JsonResponse($e->getMessage(), 400);
+            }
+
+            return new JsonResponse('Fichier uploadé', 201);
+        }
+        return new JsonResponse('Aucun fichier', 400);
     }
 }
